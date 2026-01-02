@@ -22,7 +22,7 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      - ./documents:/app/documents
+      - ./rag/documents:/app/documents
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/app/model_cache

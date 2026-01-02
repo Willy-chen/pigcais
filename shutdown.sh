@@ -1,0 +1,1 @@
+docker compose down frontend backend rag ollama

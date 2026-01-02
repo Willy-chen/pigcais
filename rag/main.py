@@ -29,10 +29,10 @@ async def startup_event():
     print(f"RAG Service (LlamaIndex) starting on: {device.upper()}")
 
     # 1. Setup Embeddings
-    # Using BAAI/bge-m3 or all-MiniLM-L6-v2 depending on preference
+    # Using BAAI/bge-large-zh-v1.5, BAAI/bge-m3 or all-MiniLM-L6-v2 depending on preference
     print("Loading Embedding Model...")
     Settings.embed_model = HuggingFaceEmbedding(
-        model_name="all-MiniLM-L6-v2", 
+        model_name="BAAI/bge-large-zh-v1.5", 
         device=device
     )
     Settings.llm = None  # We don't use the LLM here, only for prompt construction
@@ -53,7 +53,7 @@ async def startup_event():
 
     # 3. Chunking (Node Parsing)
     # Similar to RecursiveCharacterTextSplitter: chunk_size=1000, overlap=100
-    parser = SentenceSplitter(chunk_size=500, chunk_overlap=100)
+    parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
     nodes = parser.get_nodes_from_documents(documents)
     print(f"Processed {len(documents)} documents into {len(nodes)} nodes.")
 
@@ -62,7 +62,7 @@ async def startup_event():
     
     # 5. Create Retriever
     # This acts as the vector search engine
-    retriever = index.as_retriever(similarity_top_k=3)
+    retriever = index.as_retriever(similarity_top_k=10)
     print("RAG System Ready.")
 
 @app.post("/construct_prompt")
@@ -98,4 +98,5 @@ CONTEXT INFORMATION:
 USER QUESTION:
 {req.query}
 """
+    print("prompt: ", final_prompt, flush=True)
     return {"prompt": final_prompt, "context_found": True}
