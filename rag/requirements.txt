@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+requests
+# LlamaIndex Core
+llama-index-core
+llama-index-embeddings-huggingface
+llama-index-llms-ollama
+# File Parsers
+llama-index-readers-file
+# Torch (Keep your existing GPU configuration)
+torch --index-url https://download.pytorch.org/whl/cu121
+torchvision --index-url https://download.pytorch.org/whl/cu121
+torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Data Processing
+pandas
+jq

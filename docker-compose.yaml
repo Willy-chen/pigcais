@@ -1,0 +1,71 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_llm
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - llm_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  rag:
+    build: ./rag
+    container_name: rag
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./documents:/app/documents
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/app/model_cache
+    networks:
+      - llm_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - ollama
+
+  backend:
+    build: ./backend
+    container_name: backend_router
+    ports:
+      - "8000:8000"
+    environment:
+      - RAG_URL=http://rag:8001
+      - OLLAMA_URL=http://ollama:11434
+    networks:
+      - llm_net
+    depends_on:
+      - rag
+
+  frontend:
+    build: ./frontend
+    container_name: frontend_gui
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    networks:
+      - llm_net
+    depends_on:
+      - backend
+
+volumes:
+  ollama_data:
+
+networks:
+  llm_net:
+    driver: bridge
