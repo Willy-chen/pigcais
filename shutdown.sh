@@ -1,1 +1,1 @@
-docker compose down frontend backend rag ollama
+docker compose down frontend backend rag ollama_service llamacpp_service

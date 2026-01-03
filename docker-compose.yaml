@@ -1,9 +1,7 @@
 services:
-  ollama:
+  ollama_service:
     image: ollama/ollama:latest
-    container_name: ollama_llm
-    ports:
-      - "11434:11434"
+    ports: ["11434:11434"]
     volumes:
       - ollama_data:/root/.ollama
     networks:
@@ -16,11 +14,31 @@ services:
               count: 1
               capabilities: [gpu]
 
+  llamacpp_service:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports: ["8080:8080"]
+    volumes:
+      - ./models:/models
+    networks:
+      - llm_net
+    # This runs your "Selected Best Model" with high optimization
+    command: -m /models/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf -c 8192 --host 0.0.0.0 --port 8080 --n-gpu-layers 99 -np 1 -cb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   rag:
     build: ./rag
-    container_name: rag
-    ports:
-      - "8001:8001"
+    ports: ["8001:8001"]
     volumes:
       - ./rag/documents:/app/documents
     environment:
@@ -35,25 +53,24 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      - ollama
 
   backend:
     build: ./backend
-    container_name: backend_router
     ports:
       - "8000:8000"
     environment:
       - RAG_URL=http://rag:8001
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://ollama_service:11434
+      - LLAMACPP_URL=http://llamacpp_service:8080
     networks:
       - llm_net
     depends_on:
       - rag
+      - ollama_service
+      - llamacpp_service
 
   frontend:
     build: ./frontend
-    container_name: frontend_gui
     ports:
       - "8501:8501"
     environment:
