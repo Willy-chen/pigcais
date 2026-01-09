@@ -41,6 +41,7 @@ services:
     ports: ["8001:8001"]
     volumes:
       - ./rag/documents:/app/documents
+      - ./rag/storage:/app/storage
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/app/model_cache
@@ -58,6 +59,8 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
+    volumes:
+      - ./rag/documents:/app/documents
     environment:
       - RAG_URL=http://rag:8001
       - OLLAMA_URL=http://ollama_service:11434

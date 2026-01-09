@@ -1,7 +1,10 @@
 import os
-import requests
 import json
-from fastapi import FastAPI
+import shutil
+import requests
+from typing import List, Optional
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -10,11 +13,17 @@ app = FastAPI()
 RAG_URL = os.getenv("RAG_URL", "http://rag:8001")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama_service:11434")
 LLAMACPP_URL = os.getenv("LLAMACPP_URL", "http://llamacpp_service:8080")
+DOCS_DIR = "/app/documents"
 
 class ChatRequest(BaseModel):
     message: str
     model: str
+    selected_files: Optional[List[str]] = None
     
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.get("/models")
 def get_models():
     """
@@ -49,6 +58,56 @@ def get_models():
         return {"models": ["Error: No models available"]}
 
     return {"models": model_list}
+
+@app.get("/documents")
+def list_documents():
+    """List all files in the documents directory."""
+    if not os.path.exists(DOCS_DIR):
+        return []
+    files = [f for f in os.listdir(DOCS_DIR) if os.path.isfile(os.path.join(DOCS_DIR, f))]
+    return {"files": files}
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """Upload a file and incrementally add it to the RAG index."""
+    try:
+        os.makedirs(DOCS_DIR, exist_ok=True)
+        file_path = os.path.join(DOCS_DIR, file.filename)
+        
+        # 1. Save File to Disk
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # 2. Trigger Incremental Indexing
+        try:
+            # We send the filename to the RAG service so it knows exactly what to add
+            payload = {"filename": file.filename}
+            requests.post(f"{RAG_URL}/add_document", json=payload, timeout=60)
+        except Exception as e:
+            print(f"Warning: Failed to add document to index: {e}")
+
+        return {"filename": file.filename, "status": "uploaded and indexed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    """Delete a file."""
+    file_path = os.path.join(DOCS_DIR, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return {"status": "deleted", "filename": filename}
+    raise HTTPException(status_code=404, detail="File not found")
+
+@app.get("/indexing_status")
+def get_indexing_status():
+    """Proxy status check to RAG service"""
+    try:
+        # Timeout is short because we want quick UI updates
+        res = requests.get(f"{RAG_URL}/status", timeout=1)
+        return res.json()
+    except:
+        return {"is_indexing": False, "message": "RAG Service Unreachable"}
 
 def stream_llamacpp(prompt):
     url = f"{LLAMACPP_URL}/v1/chat/completions"
@@ -120,18 +179,22 @@ def stream_ollama(prompt, model_tag):
 
 @app.post("/chat_stream")
 async def chat_stream_endpoint(req: ChatRequest):
-    # 1. RAG Retrieval
     final_prompt = req.message
+    # 1. RAG Retrieval
     try:
-        rag_res = requests.post(f"{RAG_URL}/construct_prompt", json={"query": req.message})
+        rag_payload = {
+            "query": req.message,
+            "selected_files": req.selected_files # Pass the list from Frontend
+        }
+        rag_res = requests.post(f"{RAG_URL}/construct_prompt", json=rag_payload)
+        
         if rag_res.status_code == 200:
             final_prompt = rag_res.json().get("prompt", req.message)
     except Exception as e:
         print(f"RAG Error: {e}")
 
-    # 2. Routing Logic
+    # (Rest of routing logic remains the same)
     if "[Production]" in req.model:
         return StreamingResponse(stream_llamacpp(final_prompt), media_type="text/plain")
     else:
-        # Default to Ollama for everything else
         return StreamingResponse(stream_ollama(final_prompt, req.model), media_type="text/plain")
