@@ -45,6 +45,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/app/model_cache
+      - REDIS_URL=redis://redis:6379
     networks:
       - llm_net
     deploy:
@@ -54,6 +55,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - llm_net
 
   backend:
     build: ./backend
@@ -85,6 +98,7 @@ services:
 
 volumes:
   ollama_data:
+  redis_data:
 
 networks:
   llm_net:

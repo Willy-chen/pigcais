@@ -7,6 +7,9 @@ llama-index-embeddings-huggingface
 llama-index-llms-ollama
 # File Parsers
 llama-index-readers-file
+# Memory
+redis
+llama-index-storage-chat-store-redis
 # Torch (Keep your existing GPU configuration)
 torch --index-url https://download.pytorch.org/whl/cu121
 torchvision --index-url https://download.pytorch.org/whl/cu121
