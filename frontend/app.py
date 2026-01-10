@@ -1,77 +1,81 @@
 import streamlit as st
 import requests
 import os
-import uuid
 import time
 
+# --- Configuration ---
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-
 st.set_page_config(page_title="RAG Chat", layout="wide")
 
-# --- Fetch Available Models ---
-@st.cache_data(ttl=60)
-def fetch_models():
-    try:
-        response = requests.get(f"{BACKEND_URL}/models")
-        if response.status_code == 200:
-            return response.json().get("models", ["llama3"])
-        return ["llama3"] 
-    except:
-        return ["llama3"]
-
-available_models = fetch_models()
-
-# --- Session State ---
-if "sessions" not in st.session_state:
-    new_id = str(uuid.uuid4())
-    st.session_state.sessions = {new_id: {'title': "New Chat", 'messages': []}}
-    st.session_state.current_session = new_id
+# --- 1. Session State Initialization ---
+if "token" not in st.session_state:
+    st.session_state.token = None
 
 if "current_session" not in st.session_state:
-    st.session_state.current_session = list(st.session_state.sessions.keys())[0]
+    st.session_state.current_session = None
 
-# --- Sidebar: Upload & Status ---
-with st.sidebar:
-    st.header("📂 Document Library")
-    status_placeholder = st.empty()
-
-    # Indexing Status
+# --- 2. Auth Helpers ---
+def login_user(username, password):
     try:
-        # Increased timeout to 5s because embedding takes CPU power
-        status_res = requests.get(f"{BACKEND_URL}/indexing_status", timeout=5)
-        
-        if status_res.status_code == 200:
-            status_data = status_res.json()
-            
-            if status_data.get("is_indexing"):
-                # Calculate progress
-                curr = status_data.get("current", 0)
-                tot = status_data.get("total", 1)
-                if tot == 0: tot = 1
-                prog_val = min(curr / tot, 1.0)
-                
-                # Show Progress Bar
-                status_placeholder.progress(prog_val, text=f"{status_data.get('message')}")
-                
-                # Wait longer before refreshing to reduce load
-                time.sleep(2) 
-                st.rerun()
-            else:
-                status_placeholder.success("System Ready")
-        else:
-            status_placeholder.warning(f"Status Unknown ({status_res.status_code})")
-            
-    except requests.exceptions.ConnectionError:
-        # Only show error if it persists (you could add a counter here)
-        status_placeholder.error("Backend Offline")
-    except requests.exceptions.Timeout:
-        status_placeholder.warning("Backend Busy")
-    except Exception as e:
-        status_placeholder.error(f"Error: {e}")
+        res = requests.post(f"{BACKEND_URL}/auth/login", json={"username": username, "password": password})
+        if res.status_code == 200:
+            return res.json()["access_token"]
+        return None
+    except:
+        return None
 
-    # Upload
-    with st.expander("Upload Documents"):
-        uploaded_file = st.file_uploader("Select file", type=["txt", "pdf", "md", "csv", "json", "docx"])
+def register_user(username, password):
+    try:
+        res = requests.post(f"{BACKEND_URL}/auth/register", json={"username": username, "password": password})
+        return res.status_code == 200
+    except:
+        return False
+
+# --- 3. Login Screen ---
+if not st.session_state.token:
+    st.title("🔐 Login to DocuChat")
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    
+    with tab1:
+        with st.form("login"):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            if st.form_submit_button("Login"):
+                token = login_user(u, p)
+                if token:
+                    st.session_state.token = token
+                    st.success("Logged in")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+    
+    with tab2:
+        with st.form("reg"):
+            u = st.text_input("New User")
+            p = st.text_input("New Pass", type="password")
+            if st.form_submit_button("Register"):
+                if register_user(u, p):
+                    st.success("Created! Please login.")
+                else:
+                    st.error("Error creating user")
+    st.stop()
+
+# --- 4. Main App (Logged In) ---
+auth_headers = {"Authorization": f"Bearer {st.session_state.token}"}
+
+# --- Sidebar ---
+with st.sidebar:
+    st.write("👤 Logged In")
+    if st.button("Logout"):
+        st.session_state.token = None
+        st.session_state.current_session = None
+        st.rerun()
+    
+    st.divider()
+
+    # --- Document Upload ---
+    with st.expander("📂 Upload Documents"):
+        uploaded_file = st.file_uploader("Select file", type=["txt", "pdf", "md"])
         if uploaded_file:
             with st.spinner("Uploading..."):
                 files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
@@ -79,99 +83,126 @@ with st.sidebar:
                     res = requests.post(f"{BACKEND_URL}/upload", files=files)
                     if res.status_code == 200:
                         st.success("Uploaded!")
-                        time.sleep(0.5)
-                        st.rerun()
+                    else:
+                        st.error("Upload failed")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-    # File Selector
-    st.divider()
+    # --- File Selector ---
     try:
         res = requests.get(f"{BACKEND_URL}/documents")
-        file_list = res.json().get("files", []) if res.status_code == 200 else []
+        all_files = res.json().get("files", []) if res.status_code == 200 else []
     except:
-        file_list = []
-
+        all_files = []
+    
     selected_files = []
-    if file_list:
-        with st.form("file_selector"):
-            st.write(f"Available Files ({len(file_list)})")
-            for f in file_list:
+    if all_files:
+        st.divider()
+        st.write("Select Context:")
+        with st.form("files"):
+            for f in all_files:
                 if st.checkbox(f, value=True, key=f):
                     selected_files.append(f)
             st.form_submit_button("Update Context")
 
-# --- Sidebar: Chats ---
-with st.sidebar:
+    # --- Chat Management ---
     st.divider()
-    st.subheader("Chats")
-    if st.button("➕ New Chat"):
-        new_id = str(uuid.uuid4())
-        st.session_state.sessions[new_id] = {'title': "New Chat", 'messages': []}
-        st.session_state.current_session = new_id
-        st.rerun()
-    
-    for sid, sdata in st.session_state.sessions.items():
-        label = sdata['title']
-        if sid == st.session_state.current_session:
-            label = f"🟢 {label}"
-        if st.button(label, key=sid):
-            st.session_state.current_session = sid
+    st.header("Chat Rooms")
+
+    # Create New Chat (API CALL)
+    if st.button("➕ New Chat", use_container_width=True):
+        res = requests.post(f"{BACKEND_URL}/sessions", json={"title": "New Chat"}, headers=auth_headers)
+        if res.status_code == 200:
+            st.session_state.current_session = res.json()["session_id"]
             st.rerun()
 
-# --- Main Chat ---
-current_id = st.session_state.current_session
-current_messages = st.session_state.sessions[current_id]['messages']
+    # Load Sessions (API CALL)
+    try:
+        res = requests.get(f"{BACKEND_URL}/sessions", headers=auth_headers)
+        sessions = res.json().get("sessions", [])
+    except:
+        sessions = []
 
-st.title("📄 DocuChat RAG")
-st.markdown(f"**Session Docs:** {len(selected_files)} selected")
+    # Auto-Select first session if none selected
+    if not st.session_state.current_session and sessions:
+        st.session_state.current_session = str(sessions[0]["id"])
+    elif not sessions and not st.session_state.current_session:
+        # If NO sessions exist at all, force create one
+        res = requests.post(f"{BACKEND_URL}/sessions", json={"title": "New Chat"}, headers=auth_headers)
+        if res.status_code == 200:
+            st.session_state.current_session = res.json()["session_id"]
+            st.rerun()
 
-# Display History
-for msg in current_messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    # Render Session List
+    for sess in sessions:
+        sid = str(sess["id"])
+        col1, col2 = st.columns([0.8, 0.2])
+        with col1:
+            label = sess["title"]
+            if st.session_state.current_session == sid:
+                label = f"🟢 {label}"
+            if st.button(label, key=f"s_{sid}", use_container_width=True):
+                st.session_state.current_session = sid
+                st.rerun()
+        with col2:
+            if st.button("🗑️", key=f"d_{sid}"):
+                requests.delete(f"{BACKEND_URL}/sessions/{sid}", headers=auth_headers)
+                if st.session_state.current_session == sid:
+                    st.session_state.current_session = None
+                st.rerun()
 
-# Model Select
-col1, _ = st.columns([1, 4])
-with col1:
-    selected_model = st.selectbox("Model", available_models, index=0)
+# --- Main Chat Area ---
+if st.session_state.current_session:
+    sess_id = st.session_state.current_session
 
-# Input
-if prompt := st.chat_input("Ask a question..."):
-    # Title update
-    if not current_messages:
-        st.session_state.sessions[current_id]['title'] = prompt[:20]
+    # 1. Load History (API CALL)
+    try:
+        res = requests.get(f"{BACKEND_URL}/sessions/{sess_id}/messages", headers=auth_headers)
+        messages = res.json().get("messages", [])
+    except:
+        messages = []
 
-    # User message UI
-    st.session_state.sessions[current_id]['messages'].append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    st.title("📄 DocuChat RAG")
+    
+    # 2. Display Messages
+    for msg in messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    # Assistant Response
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
+    # 3. Chat Input
+    if prompt := st.chat_input("Ask something..."):
+        # Optimistic UI Update
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        try:
-            # Send session_id for memory handling
+        # Stream Response
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            full_response = ""
+            
             payload = {
-                "message": prompt, 
-                "model": selected_model, 
-                "selected_files": selected_files,
-                "session_id": current_id 
+                "message": prompt,
+                "model": "llama3",
+                "session_id": sess_id,
+                "selected_files": selected_files
             }
             
-            with requests.post(f"{BACKEND_URL}/chat_stream", json=payload, stream=True) as r:
-                if r.status_code == 200:
-                    for chunk in r.iter_content(chunk_size=None):
-                        if chunk:
-                            text_chunk = chunk.decode("utf-8")
-                            full_response += text_chunk
-                            message_placeholder.markdown(full_response + "▌")
-                    message_placeholder.markdown(full_response)
-                else:
-                    message_placeholder.error(f"Error: {r.text}")
-        except Exception as e:
-            message_placeholder.error(f"Connection Error: {e}")
-            
-        st.session_state.sessions[current_id]['messages'].append({"role": "assistant", "content": full_response})
+            try:
+                # Use requests.post with stream=True
+                with requests.post(f"{BACKEND_URL}/chat_stream", json=payload, stream=True) as r:
+                    if r.status_code == 200:
+                        for chunk in r.iter_content(chunk_size=None):
+                            if chunk:
+                                text = chunk.decode("utf-8")
+                                full_response += text
+                                placeholder.markdown(full_response + "▌")
+                        placeholder.markdown(full_response)
+                        
+                        # (Optional) Update Title after first message?
+                        # You can add logic here to PATCH the session title if len(messages) == 0
+                    elif r.status_code == 404:
+                         placeholder.error("Session expired. Please create a new chat.")
+                    else:
+                        placeholder.error(f"Error: {r.status_code}")
+            except Exception as e:
+                placeholder.error(f"Connection Error: {e}")

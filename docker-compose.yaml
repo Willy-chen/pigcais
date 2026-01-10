@@ -75,15 +75,32 @@ services:
     volumes:
       - ./rag/documents:/app/documents
     environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/chat_app
       - RAG_URL=http://rag:8001
       - OLLAMA_URL=http://ollama_service:11434
       - LLAMACPP_URL=http://llamacpp_service:8080
     networks:
       - llm_net
     depends_on:
+      - db
       - rag
       - ollama_service
       - llamacpp_service
+
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: chat_app
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - llm_net
 
   frontend:
     build: ./frontend
@@ -99,6 +116,7 @@ services:
 volumes:
   ollama_data:
   redis_data:
+  postgres_data:
 
 networks:
   llm_net:

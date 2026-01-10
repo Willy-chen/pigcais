@@ -5,14 +5,25 @@ import logging
 import requests
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import jwt
+import database
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
 from fastapi.responses import StreamingResponse
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# --- Configuration ---
+SECRET_KEY = "SUPER_SECRET_KEY"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 # Service URLs
 RAG_URL = os.getenv("RAG_URL", "http://localhost:8001")
@@ -23,8 +34,114 @@ DOCS_DIR = "./documents"
 class ChatRequest(BaseModel):
     message: str
     model: str
-    session_id: str  # <--- Required for memory
+    session_id: str 
     selected_files: Optional[List[str]] = None
+
+class UserAuth(BaseModel):
+    username: str
+    password: str
+
+class NewSession(BaseModel):
+    title: str
+
+@app.on_event("startup")
+def startup():
+    # Wait loop logic could be added here if DB takes time to start
+    try:
+        database.init_db()
+    except Exception as e:
+        logger.error(f"DB Init Failed: {e}")
+
+# --- Authentication Helpers ---
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user_id(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None: 
+            raise ValueError("Token missing 'sub' (User ID)")
+        return int(user_id)
+    except jwt.ExpiredSignatureError:
+        logger.error("Token has expired.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.InvalidTokenError as e:
+        logger.error(f"Invalid Token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected Auth Error: {e}") # <--- THIS WILL SHOW IN LOGS
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+# --- NEW: Authentication Endpoints ---
+
+@app.post("/auth/register")
+def register(user: UserAuth):
+    """Register a new user."""
+    if database.create_user(user.username, user.password):
+        return {"status": "User created successfully"}
+    raise HTTPException(status_code=400, detail="Username already exists")
+
+@app.post("/auth/login")
+def login(user: UserAuth):
+    """Login and return JWT token."""
+    user_id = database.verify_user(user.username, user.password)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # FIX: Convert user_id to string for the JWT 'sub' claim
+    access_token = create_access_token(data={"sub": str(user_id)})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# --- Session Management ---
+
+@app.get("/sessions")
+def get_sessions(user_id: int = Depends(get_current_user_id)):
+    sessions = database.get_user_sessions(user_id)
+    # Convert UUIDs to strings for JSON serialization
+    for s in sessions:
+        s['id'] = str(s['id'])
+    return {"sessions": sessions}
+
+@app.post("/sessions")
+def create_session(s: NewSession, user_id: int = Depends(get_current_user_id)):
+    session_id = database.create_session(user_id, s.title)
+    return {"session_id": session_id, "title": s.title}
+
+@app.delete("/sessions/{session_id}")
+def delete_session_endpoint(session_id: str, user_id: int = Depends(get_current_user_id)):
+    """Delete a chat session and all its messages."""
+    success = database.delete_session(session_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+    return {"status": "deleted", "session_id": session_id}
+
+@app.get("/sessions/{session_id}/messages")
+def get_messages(session_id: str, user_id: int = Depends(get_current_user_id)):
+    messages = database.get_session_messages(session_id)
+    return {"messages": messages}
+
+# --- System & Model Endpoints ---
 
 @app.get("/health")
 def health():
@@ -147,9 +264,17 @@ def stream_ollama(prompt, model_tag):
 
 @app.post("/chat_stream")
 async def chat_stream_endpoint(req: ChatRequest):
+    
+    # 1. Save User Message to Postgres
+    try:
+        database.add_message(req.session_id, "user", req.message)
+    except Exception as e:
+        logger.error(f"Database Error: {e}")
+        raise HTTPException(status_code=404, detail="Session not found. Please create a new chat.")
+    
     final_prompt = req.message
     
-    # 1. Construct Prompt (History + Context) via RAG Service
+    # 2. Construct Prompt (History + Context) via RAG Service
     try:
         rag_payload = {
             "query": req.message,
@@ -165,20 +290,26 @@ async def chat_stream_endpoint(req: ChatRequest):
     except Exception as e:
         logger.error(f"RAG Error: {e}")
 
-    # 2. Select Generator
+    # 3. Select Generator
     if "[Production]" in req.model:
         generator = stream_llamacpp(final_prompt)
     else:
         generator = stream_ollama(final_prompt, req.model)
 
-    # 3. Stream & Accumulate for Memory
+    # 4. Stream & Accumulate for Memory
     async def response_wrapper():
         full_response = ""
         for chunk in generator:
             full_response += chunk
             yield chunk
         
-        # 4. Save Turn to Memory (After stream finishes)
+        # 5. Save AI Response to Database (CRITICAL FIX: Ensure history is saved)
+        try:
+            database.add_message(req.session_id, "assistant", full_response)
+        except Exception as e:
+            logger.error(f"Failed to save assistant message to DB: {e}")
+
+        # 6. Save Turn to RAG Memory (Redis/Vector)
         try:
             save_payload = {
                 "session_id": req.session_id,
@@ -186,9 +317,8 @@ async def chat_stream_endpoint(req: ChatRequest):
                 "ai_response": full_response
             }
             requests.post(f"{RAG_URL}/save_turn", json=save_payload, timeout=2)
-            logger.info(f"Memory saved for session {req.session_id}")
         except Exception as e:
-            logger.error(f"Failed to save memory: {e}")
+            logger.error(f"Failed to save RAG memory: {e}")
 
     return StreamingResponse(response_wrapper(), media_type="text/plain")
 
