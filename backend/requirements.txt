@@ -5,3 +5,9 @@ python-multipart
 psycopg2-binary
 pyjwt
 bcrypt
+torch
+transformers
+xgboost
+librosa
+scipy
+firebase-admin

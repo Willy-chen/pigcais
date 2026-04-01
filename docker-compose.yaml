@@ -74,6 +74,8 @@ services:
       - "8000:8000"
     volumes:
       - ./rag/documents:/app/documents
+      - ./20260209_n/best_ast_model:/app/best_ast_model
+      - ./20260302_ultimate/results:/app/ultimate_results
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/chat_app
       - RAG_URL=http://rag:8001
@@ -81,11 +83,18 @@ services:
       - LLAMACPP_URL=http://llamacpp_service:8080
     networks:
       - llm_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       - db
       - rag
-      - ollama_service
-      - llamacpp_service
+      # - ollama_service
+      # - llamacpp_service
 
   db:
     image: postgres:15

@@ -1,2 +1,7 @@
 streamlit
 requests
+plotly
+pandas
+numpy
+firebase-admin
+extra-streamlit-components

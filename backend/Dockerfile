@@ -8,4 +8,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY main.py .
 COPY database.py .
+COPY audio_inference.py .
+COPY feature_utils.py .
+COPY train_xgb.py .
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

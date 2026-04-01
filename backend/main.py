@@ -22,7 +22,7 @@ app = FastAPI()
 # --- Configuration ---
 SECRET_KEY = "SUPER_SECRET_KEY"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 # Service URLs
@@ -43,6 +43,9 @@ class UserAuth(BaseModel):
 
 class NewSession(BaseModel):
     title: str
+
+class UrlRequest(BaseModel):
+    url: str
 
 @app.on_event("startup")
 def startup():
@@ -197,6 +200,85 @@ async def upload_document(file: UploadFile = File(...)):
 
         return {"filename": file.filename, "status": "uploaded and indexed"}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze_audio")
+async def analyze_audio(file: UploadFile = File(...)):
+    try:
+        # Save temp file
+        temp_path = f"/tmp/{file.filename}"
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        import audio_inference
+        import train_xgb
+        
+        # If model doesn't exist, train it!
+        if getattr(audio_inference, 'XGB_MODEL_PATH', None):
+            if not os.path.exists(audio_inference.XGB_MODEL_PATH) and not os.path.exists("ultimate_xgb.json"):
+                # Run the train_and_save to create the model json since it doesn't exist
+                logger.info("XGB model not found, training on the fly...")
+                train_xgb.train_and_save()
+                
+        processor = audio_inference.get_processor()
+        
+        async def event_generator():
+            try:
+                for chunk in processor.predict(temp_path):
+                    yield json.dumps(chunk) + "\n"
+            except Exception as e:
+                yield json.dumps({"status": "error", "message": str(e)}) + "\n"
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+        
+    except Exception as e:
+        logger.error(f"Audio Analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze_url")
+async def analyze_url(req: UrlRequest):
+    try:
+        # Download remote file
+        filename = req.url.split("/")[-1].split("?")[0]
+        if not filename.lower().endswith(".wav"):
+            filename += ".wav"
+        temp_path = f"/tmp/{filename}"
+        
+        logger.info(f"Downloading remote audio: {req.url}")
+        with requests.get(req.url, stream=True) as r:
+            r.raise_for_status()
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        import audio_inference
+        import train_xgb
+        
+        # If model doesn't exist, train it!
+        if getattr(audio_inference, 'XGB_MODEL_PATH', None):
+            if not os.path.exists(audio_inference.XGB_MODEL_PATH) and not os.path.exists("ultimate_xgb.json"):
+                logger.info("XGB model not found, training on the fly...")
+                train_xgb.train_and_save()
+                
+        processor = audio_inference.get_processor()
+        
+        async def event_generator():
+            try:
+                for chunk in processor.predict(temp_path):
+                    yield json.dumps(chunk) + "\n"
+            except Exception as e:
+                yield json.dumps({"status": "error", "message": str(e)}) + "\n"
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+        
+    except Exception as e:
+        logger.error(f"Remote Audio Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/indexing_status")
